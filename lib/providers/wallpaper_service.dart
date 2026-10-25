@@ -35,6 +35,13 @@ class WallpaperService extends ChangeNotifier {
   late File _wallpaperNightFile;
   Timer? _timer;
 
+  // Wallpaper rotation
+  static const Duration _rotationInterval = Duration(seconds: 30);
+  Directory? _rotationDir;
+  List<File> _rotationFiles = [];
+  int _rotationIndex = 0;
+  Timer? _rotationTimer;
+
   ImageProvider? _wallpaper;
   int _version = 0;
   int _updateWallpaperCallCount = 0;
@@ -69,6 +76,7 @@ class WallpaperService extends ChangeNotifier {
   void dispose() {
     _settingsService.removeListener(_onSettingsChanged);
     _timer?.cancel();
+    _rotationTimer?.cancel();
     super.dispose();
   }
 
@@ -79,91 +87,21 @@ class WallpaperService extends ChangeNotifier {
     _wallpaperNightFile = File("${directory.path}/wallpaper_night");
 
     _lastTimeBasedEnabled = _settingsService.timeBasedWallpaperEnabled;
+
+    try {
+      final external = await getExternalStorageDirectory();
+      if (external != null) {
+        _rotationDir = Directory("${external.path}/wallpapers");
+        if (!await _rotationDir!.exists()) {
+          await _rotationDir!.create(recursive: true);
+        }
+      }
+    } catch (_) {}
+    await _refreshRotationFiles();
+    _rotationTimer = Timer.periodic(_rotationInterval, (_) => _rotate());
+
     await _updateWallpaper();
     _updateTimerState();
   }
 
-  void _updateTimerState() {
-    final enabled = _settingsService.timeBasedWallpaperEnabled;
-    if (enabled && (_timer == null || !_timer!.isActive)) {
-      _timer = Timer.periodic(const Duration(minutes: 1), (_) => _updateWallpaper());
-    } else if (!enabled && _timer != null) {
-      _timer?.cancel();
-      _timer = null;
-    }
-  }
-
-  Future<void> _updateWallpaper({bool force = false}) async {
-    final callId = ++_updateWallpaperCallCount;
-    final now = DateTime.now();
-    final isDay = now.hour >= 6 && now.hour < 18;
-    final enabled = _settingsService.timeBasedWallpaperEnabled;
-
-    ImageProvider? newWallpaper;
-
-    if (enabled) {
-      if (isDay && await _wallpaperDayFile.exists()) {
-        newWallpaper = FileImage(_wallpaperDayFile);
-      } else if (!isDay && await _wallpaperNightFile.exists()) {
-        newWallpaper = FileImage(_wallpaperNightFile);
-      } else if (await _wallpaperFile.exists()) {
-        newWallpaper = FileImage(_wallpaperFile); // Fallback
-      }
-    } else {
-      if (await _wallpaperFile.exists()) {
-        newWallpaper = FileImage(_wallpaperFile);
-      }
-    }
-
-    if (callId == _updateWallpaperCallCount) {
-      if (_wallpaper != newWallpaper || force) {
-        _wallpaper = newWallpaper;
-        notifyListeners();
-      }
-    }
-  }
-
-  Future<void> pickWallpaper() async {
-    await _pickAndSave(_wallpaperFile);
-  }
-
-  Future<void> pickWallpaperDay() async {
-    await _pickAndSave(_wallpaperDayFile);
-  }
-
-  Future<void> pickWallpaperNight() async {
-    await _pickAndSave(_wallpaperNightFile);
-  }
-
-  Future<void> _pickAndSave(File targetFile) async {
-    if (!await _fLauncherChannel.checkForGetContentAvailability()) {
-      throw NoFileExplorerException();
-    }
-
-    final imagePicker = ImagePicker();
-    final pickedFile = await imagePicker.pickImage(source: ImageSource.gallery);
-    if (pickedFile != null) {
-      // Use stream for memory efficiency
-      final readStream = pickedFile.openRead();
-      final writeStream = targetFile.openWrite();
-      await readStream.cast<List<int>>().pipe(writeStream);
-
-      // Evict from cache to ensure UI updates
-      await FileImage(targetFile).evict();
-
-      _version++;
-      await _updateWallpaper(force: true);
-    }
-  }
-
-  Future<void> setGradient(FLauncherGradient fLauncherGradient) async {
-    if (await _wallpaperFile.exists()) {
-      await _wallpaperFile.delete();
-    }
-
-    _settingsService.setGradientUuid(fLauncherGradient.uuid);
-    notifyListeners();
-  }
-}
-
-class NoFileExplorerException implements Exception {}
+  Future
